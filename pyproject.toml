@@ -12,6 +12,7 @@ openai = "^1.14.2"
 typer = {extras = ["all"], version = "^0.10.0"}
 python-dotenv = "^1.0.1"
 pandas = "^2.2.1"
+pygit2 = "^1.14.1"
 
 
 [build-system]
