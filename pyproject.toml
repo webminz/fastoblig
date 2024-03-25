@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "fastoblig"
+version = "0.1.0"
+description = ""
+authors = ["Patrick Stünkel <webminz@googlemail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = "^2.31.0"
+openai = "^1.14.2"
+typer = {extras = ["all"], version = "^0.10.0"}
+python-dotenv = "^1.0.1"
+pandas = "^2.2.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
