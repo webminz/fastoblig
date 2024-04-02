@@ -6,7 +6,7 @@ from pathlib import Path
 
 class Student(BaseModel):
     id: int
-    student_no: str | None
+    student_no: int | None
     firstname: str 
     lastname: str 
     email: str
@@ -35,7 +35,7 @@ class Exercise(BaseModel):
     id : int 
     course: int
     name: str 
-    content: str 
+    content: str | None
     grading : str | None 
     max_points: float | None
     description_type : str = "canvas"
@@ -67,11 +67,23 @@ class SubmissionState(Enum):
     FEEDBACK_GENERATED = 6 
     FEEDBACK_PUBLISHED = 7
 
+    @staticmethod
+    def from_workflow_state(state: str, grade: str | float | None):
+        if state == "submitted":
+            return SubmissionState.SUBMITTED
+        elif state == "graded" and grade == "complete":
+            return SubmissionState.PASSED # externally graded
+        elif state == "graded":
+            return SubmissionState.FAILED
+        else:
+            return SubmissionState.UNSUBMITTED
+
 
 class Submission(BaseModel):
     id: int 
     exercise: int 
     content: str | None
+    submission_type: str
     submission_group_id: int | None
     submission_group_name: str | None
     submission_group_no: int | None 
@@ -79,8 +91,8 @@ class Submission(BaseModel):
     state : SubmissionState = SubmissionState.UNSUBMITTED
     submitted_at: datetime | None  
     graded_at: datetime | None  
-    grade: float | None = None
     extended_to: datetime | None = None
+    grade: float | None = None
     testresult: str | None = None
     comment: str | None = None
     feedback: str | None = None

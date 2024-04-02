@@ -5,8 +5,8 @@ import logging
 from typing import Any, Literal
 import re
 import requests
-from domain import Student, Exercise, Course, Submission
-from storage import CANVAS_TOKEN, Storage
+from fastoblig.domain import Student, Exercise, Course, Submission, SubmissionState
+from fastoblig.storage import CANVAS_TOKEN, Storage
 
 # Base URL for Canvas LMS
 BASE_URL = "https://hvl.instructure.com/api/v1"
@@ -66,7 +66,7 @@ def parse_student(json: dict[str, Any]) -> Student | None:
             match = _studno_regex.fullmatch(mail)
             student_no = None
             if match:
-                student_no = match.group(1)
+                student_no = int(match.group(1))
             return Student(
                 id=id,
                 email=mail,
@@ -137,16 +137,15 @@ def parse_submission(exercise: int, json: dict[str, Any]):
         else:
             content = json["body"]
 
+        state = SubmissionState.from_workflow_state(json["workflow_state"], json['grade'])
         submission_ts = None
-        state = json["workflow_state"]
-        if state != "unsubmitted":
+        grade_ts = None
+        score = None
+        if state != SubmissionState.UNSUBMITTED:
             if json["submitted_at"]:
                 submission_ts = datetime.fromisoformat(json["submitted_at"][:-1])
                 submission_ts = submission_ts.replace(tzinfo=LOCAL_TZ)
-
-        grade_ts = None
-        score = None
-        if state == "graded":
+        if state in {SubmissionState.PASSED, SubmissionState.FAILED}:
             if json["graded_at"]:
                 grade_ts = datetime.fromisoformat(json["graded_at"][:-1])
                 grade_ts = grade_ts.replace(tzinfo=LOCAL_TZ)
@@ -171,6 +170,7 @@ def parse_submission(exercise: int, json: dict[str, Any]):
         return Submission(
             id=id,
             content=content,
+            submission_type=json['submission_type'],
             exercise=exercise,
             submitted_at=submission_ts,
             state=state,
@@ -191,9 +191,10 @@ def parse_submission(exercise: int, json: dict[str, Any]):
 
 class CanvasClient:
 
-    def __init__(self, storage: Storage, base_url=BASE_URL) -> None:
+    def __init__(self, storage: Storage, base_url=BASE_URL, default_page_size=DEFAULT_PAGE_SIZE) -> None:
         self.storage = storage
         self.base_url = base_url
+        self.default_page_size = default_page_size
 
     def _auth_header(self):
         token = self.storage.get_token(CANVAS_TOKEN)
@@ -203,7 +204,7 @@ class CanvasClient:
             return {}
 
     def get_courses(self) -> list[Course]:
-        query = f"per_page={DEFAULT_PAGE_SIZE}"
+        query = f"per_page={self.default_page_size}"
         url = self.base_url + "/courses" + "?" + query
         response = requests.get(url, headers=self._auth_header())
         if response.status_code == 200:
@@ -221,7 +222,7 @@ class CanvasClient:
             return []
 
     def get_enrollments(self, course_id: int) -> list[Student]:
-        query = f"per_page={DEFAULT_PAGE_SIZE}"
+        query = f"per_page={self.default_page_size}"
         url = self.base_url + f"/courses/{course_id}/enrollments" + "?" + query
         response = requests.get(url, headers=self._auth_header())
         if response.status_code == 200:
@@ -237,7 +238,7 @@ class CanvasClient:
             return []
 
     def get_exercises(self, course_id: int) -> list[Exercise]:
-        query = f"per_page={DEFAULT_PAGE_SIZE}"
+        query = f"per_page={self.default_page_size}"
         # first get all groups
         ass_groups_url = (
             self.base_url + f"/courses/{course_id}/assignment_groups" + "?" + query
@@ -273,7 +274,7 @@ class CanvasClient:
 
     def get_submissions(self, course_id: int, exercise_id: int) -> list[Submission]:
         result = []
-        query = f"per_page={DEFAULT_PAGE_SIZE}&grouped=true&include=group"
+        query = f"per_page={self.default_page_size}&grouped=true&include=group"
         url = (
             self.base_url
             + f"/courses/{course_id}/assignments/{exercise_id}/submissions?"

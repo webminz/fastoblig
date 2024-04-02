@@ -1,11 +1,11 @@
 from pathlib import Path
-from storage import Storage, CANVAS_TOKEN, OPENAI_TOKEN, UpdateResult
+from fastoblig.storage import Storage, CANVAS_TOKEN, OPENAI_TOKEN, UpdateResult
 from typing import Optional
 from typer import Typer, get_app_dir, confirm, progressbar
 from rich.console import Console
 from rich.table import Table
 import os
-import canvas
+from fastoblig.canvas import CanvasClient
 import pygit2
 
 
@@ -28,7 +28,7 @@ def startup():
 
 # Domain objects
 storage = startup()
-client = canvas.CanvasClient(storage)
+client = CanvasClient(storage)
 
 # Typer
 app = Typer(no_args_is_help=True)
