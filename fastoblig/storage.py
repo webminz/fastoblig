@@ -93,6 +93,7 @@ class UpdateResult(Enum):
     NEW = 1
     MODIFIED = 2
     REMOVED = 3
+    REJECTED = 4
 
 class Storage:
     """
@@ -184,6 +185,33 @@ WHERE id=?\
                            (course.id, course.code, course.description, course.semester, course.year))
         self.connection.commit()
         cursor.close()
+
+    def get_course(self, course_id: int) -> Course | None:
+        """
+        Retrieves a stored course information object if exists.
+        """
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT code, description, semester, year FROM courses WHERE id = ?", (course_id,))
+        result_row = cursor.fetchone()
+        result = None
+        if result_row:
+            result = Course(id=course_id, code=result_row[0], description=result_row[1], semester=result_row[2], year=result_row[3])
+        cursor.close()
+        return result
+
+    def get_student(self, student_id: int) -> Student | None:
+        """
+        Retrieves the student with given id if exists.
+        """
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT email, firstname, lastname, studentno FROM students WHERE id=?", (student_id,))
+        result_row = cursor.fetchone()
+        result = None
+        if result_row:
+            result = Student(id=student_id, student_no=result_row[3], email=result_row[0], firstname=result_row[1], lastname=result_row[2])
+        cursor.close()
+        return result
+
 
     
 
@@ -278,7 +306,7 @@ WHERE id = ? and course = ?\
                   exercise.max_points,
                   "published" if exercise.published else "unpublished",
                   exercise.submission_category_id,
-                  exercise.grading_path,
+                  str(exercise.grading_path),
                   exercise.id, exercise.course))
             result = UpdateResult.MODIFIED
         else:
@@ -306,7 +334,7 @@ submission_category_group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\
                   exercise.grading,
                   exercise.max_points,
                   "published" if exercise.published else "unpublished",
-                  exercise.grading_path,
+                  str(exercise.grading_path),
                   exercise.submission_category_id,
                   ))
             result = UpdateResult.NEW
@@ -366,7 +394,7 @@ feedback_file FROM submissions WHERE exercise = ?\
             ))
         return result
 
-    def upsert_submissions(self, exercise_id: int,  submissions: list[Submission]) -> dict[int, UpdateResult]:
+    def upsert_submissions(self, exercise_id: int,  submissions: list[Submission], force: bool = False) -> dict[int, UpdateResult]:
         """
         This method compares the given list of submission with the stored submissions 
         and updates them accordingly or inserts new submissions if they are not stored.
@@ -386,6 +414,12 @@ feedback_file FROM submissions WHERE exercise = ?\
                 if new.model_dump() == old_submission.model_dump():
                     result[new.id] = UpdateResult.UNCHANGED
                 else:
+
+                    # do not let the GET request overwrite the database if it is more recent
+                    if not force and new.state not in {SubmissionState.PASSED, SubmissionState.FAILED} and new.state.value < old_submission.state.value:
+                        result[new.id] = UpdateResult.REJECTED
+                        continue
+
                     cursor.execute("""\
 UPDATE submissions SET
 repo_url=?,
@@ -404,7 +438,7 @@ feedback_file=?
 WHERE
 id=? AND
 exercise=?\
-                    """, (new.content if new.submission_type == "repo_url" else None,
+                    """, (new.content if new.submission_type == "online_url" else None,
                           new.submission_type,
                           new.submission_group_id,
                           new.submission_group_no,
@@ -414,7 +448,7 @@ exercise=?\
                           new.extended_to.isoformat() if new.extended_to else None, 
                           new.submitted_at.isoformat() if new.submitted_at else None,
                           new.graded_at.isoformat() if new.graded_at else None,
-                          new.content,
+                          new.comment,
                           new.testresult,
                           new.feedback,
                           new.id,
@@ -444,7 +478,7 @@ feedback_file
                 """, (
                        new.id,
                        new.exercise,
-                       new.content if new.submission_type == "repo_url" else None,
+                       new.content if new.submission_type == "online_url" else None,
                        new.submission_type,
                        new.submission_group_id,
                        new.submission_group_no,
@@ -454,7 +488,7 @@ feedback_file
                        new.extended_to.isoformat() if new.extended_to else None, 
                        new.submitted_at.isoformat() if new.submitted_at else None,
                        new.graded_at.isoformat() if new.graded_at else None,
-                       new.content,
+                       new.comment,
                        new.testresult,
                        new.feedback,
                         ))

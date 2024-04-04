@@ -14,7 +14,7 @@ class Student(BaseModel):
 class Course(BaseModel):
     id: int 
     code: str | None
-    description: str | None
+    description: str 
     semester : Literal["spring"] | Literal["fall"] | None
     year: int | None
 
@@ -56,6 +56,14 @@ class Exercise(BaseModel):
                 return False 
         return True
 
+    def print_state(self) -> str:
+        if self.grading_path is not None:
+            return "GRADING"
+        elif self.published:
+            return "PUBLISHED"
+        else: 
+            return "UNPUBLISHED"
+
 
 class SubmissionState(Enum):
     UNSUBMITTED = 0
@@ -83,7 +91,7 @@ class Submission(BaseModel):
     id: int 
     exercise: int 
     content: str | None
-    submission_type: str
+    submission_type: str | None
     submission_group_id: int | None
     submission_group_name: str | None
     submission_group_no: int | None 

@@ -15,7 +15,7 @@ COURSES_JSON = """\
         "id": 50001,
         "name": "ING301-1 23V Datateknologi og videregående programmering for ingeniører",
         "account_id": 60001,
-        "uuid": "95ddb0ba-7cdb-4331-bcd5-22fb8adca751",
+        "uuid": "95ddb0ba7cdb4331bcd522fb8adca751",
         "start_at": null,
         "grading_standard_id": null,
         "is_public": false,

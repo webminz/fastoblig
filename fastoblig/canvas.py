@@ -11,6 +11,7 @@ from fastoblig.storage import CANVAS_TOKEN, Storage
 # Base URL for Canvas LMS
 BASE_URL = "https://hvl.instructure.com/api/v1"
 
+UTC_TZ = ZoneInfo("UTC")
 LOCAL_TZ = ZoneInfo("Europe/Oslo")
 
 # Many Canvas endpoints are paginated
@@ -97,7 +98,8 @@ def parse_exercise(course: int, group: str, json: dict[str, Any]) -> Exercise | 
         deadline = None
         if "due_at" in json and json["due_at"]:
             deadline = datetime.fromisoformat(json["due_at"][:-1])
-            deadline = deadline.replace(tzinfo=LOCAL_TZ)
+            deadline = deadline.replace(tzinfo=UTC_TZ)
+            deadline = deadline.astimezone(LOCAL_TZ)
 
         max_points = None
         if "points_possible" in json:
@@ -144,11 +146,13 @@ def parse_submission(exercise: int, json: dict[str, Any]):
         if state != SubmissionState.UNSUBMITTED:
             if json["submitted_at"]:
                 submission_ts = datetime.fromisoformat(json["submitted_at"][:-1])
-                submission_ts = submission_ts.replace(tzinfo=LOCAL_TZ)
+                submission_ts = submission_ts.replace(tzinfo=UTC_TZ)
+                submission_ts = submission_ts.astimezone(LOCAL_TZ)
         if state in {SubmissionState.PASSED, SubmissionState.FAILED}:
             if json["graded_at"]:
                 grade_ts = datetime.fromisoformat(json["graded_at"][:-1])
-                grade_ts = grade_ts.replace(tzinfo=LOCAL_TZ)
+                grade_ts = grade_ts.replace(tzinfo=UTC_TZ)
+                grade_ts = grade_ts.astimezone(LOCAL_TZ)
             state = json["grade"]
             score = json["score"]
 
@@ -167,12 +171,20 @@ def parse_submission(exercise: int, json: dict[str, Any]):
                 if match:
                     submission_group_no = int(match.group(1))
 
+        extended_to = None
+        if json['cached_due_date']:
+            extended_to = datetime.fromisoformat(json['cached_due_date'][:-1])
+            extended_to = extended_to.replace(tzinfo=UTC_TZ)
+            extended_to = extended_to.astimezone(LOCAL_TZ)
+
+
         return Submission(
             id=id,
             content=content,
             submission_type=json['submission_type'],
             exercise=exercise,
             submitted_at=submission_ts,
+            extended_to=extended_to,
             state=state,
             members=users,
             submission_group_id=submission_group_id,
@@ -306,3 +318,14 @@ class CanvasClient:
             logging.debug(response.content)
 
         return result
+
+
+    def update_submission(self, course_id: int, assignment_id: int, student_id: int,
+                          comment: str | None = None, grading: str | None = None):
+        url = f"{self.base_url}/courses/{course_id}/assignments/{assignment_id}/submissions/{student_id}"
+        data = {}
+        if comment:
+            data['comment[text_comment]'] = comment
+        if grading:
+            data['submission[posted_grade]'] = grading
+        requests.put(url, headers=self._auth_header(), data=data)
