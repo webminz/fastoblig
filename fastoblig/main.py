@@ -151,6 +151,9 @@ def get_exercises(course: int):
     exercises = client.get_exercises(course)
     table = Table("id", "name", "group", "deadline", "state" , "grading", "points")
     for e in sorted(exercises):
+        stored_e = storage.get_exercise(e.course, e.id)
+        if stored_e is not None:
+            e = stored_e
         table.add_row(str(e.id),
                       e.name, e.category,
                       e.deadline.isoformat() if e.deadline is not None else None,

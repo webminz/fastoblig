@@ -153,7 +153,6 @@ def parse_submission(exercise: int, json: dict[str, Any]):
                 grade_ts = datetime.fromisoformat(json["graded_at"][:-1])
                 grade_ts = grade_ts.replace(tzinfo=UTC_TZ)
                 grade_ts = grade_ts.astimezone(LOCAL_TZ)
-            state = json["grade"]
             score = json["score"]
 
         users = []

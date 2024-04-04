@@ -16,6 +16,23 @@ First, you will have to install it with Poetry:
 poetry install
 ```
 
+afterwards, you may enter the Poetry-managed shell environment with 
+```bash
+poetry shell
+```
+
+in this shell, the `fastoblig` binary is available. Call:
+```bash
+fastoblig --help
+```
+to see your options.
+
+You may first have to have a look at the `config` sub-command to set your _tokens_ (Canvas LMS, OpenAI API, and a GitHub access token with `issue:write` permission):
+```bash
+fastoblig config --help
+```
+
+
 Then, you can run the `fastoblig` binary. When you call it without parameters, it will tell you about the possible options.
 
 You will also have to set the `CANVAS_TOKEN` environment variable, which has to contain the secret app token, which 
