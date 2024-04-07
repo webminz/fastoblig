@@ -1,22 +1,25 @@
-from pathlib import Path
+import os
 import re
 import shutil
-from fastoblig.domain import Exercise, Submission, SubmissionState
-from fastoblig.storage import GITHUB_TOKEN, Storage, CANVAS_TOKEN, OPENAI_TOKEN, UpdateResult
-from typing import Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Literal, Optional
+import xml.etree.ElementTree as ET
+
+import pygit2
+import git
 from typer import Typer, get_app_dir, confirm, prompt
 from rich.console import Console
 from rich.table import Table
 from rich.markdown import Markdown
 from rich.panel import Panel
-import os
-from fastoblig.canvas import CanvasClient
-import pygit2
+
+from fastoblig.canvas import CanvasClient, LOCAL_TZ
+from fastoblig.domain import Exercise, Submission, SubmissionState
+from fastoblig.storage import GITHUB_TOKEN, Storage, CANVAS_TOKEN, OPENAI_TOKEN, UpdateResult
 from fastoblig.utils import GitProgressbar, run_pytest
-from fastoblig.feedback import create_system_prompt, collect_submission_files, contact_openai
-import xml.etree.ElementTree as ET
+from fastoblig.feedback import AddressSettings, create_system_prompt, collect_submission_files, contact_openai
 from fastoblig.github import upload_issue
-import git
 
 APP_NAME = "fastoblig"
 console = Console()
@@ -93,6 +96,7 @@ def list_courses():
         for c in courses:
             state = None
             if storage.get_course(c.id):
+                # TODO: the tracking of enrollment should better be done similar to submissions
                 state = "TRACKING"
             table.add_row(str(c.id), c.code, str(c.year), c.semester, c.description, state)
         console.print(table)
@@ -110,13 +114,13 @@ def track_course(course: int, write_csv: Optional[Path] = None):
         students = client.get_enrollments(course)
         if students and len(students) > 0:
             file = None
+            # TODO: remove write_csv option and replace with a dedicated statistic method
             if write_csv:
                 file = open(write_csv, "w")
                 file.write("id,student_no,firstname,lastname,email\n")
             table = Table("id", "student_no", "firstname", "lastname", "email")
             for s in students:
                 style = None
-                # TODO: the tracking of enrollment should better be done similar to submissions
                 result = storage.upsert_enrollment(course, s)
                 if result == UpdateResult.NEW:
                     style = 'green'
@@ -267,6 +271,7 @@ def get_submissions(course: int, exercise: int):
 
 
 def do_checkout(exercise: Exercise, submission: Submission):
+    console.rule(f"Current State: {submission.state.name} | Next Phase: DOWNLOAD SUBMISSION")
     if exercise.description_type == "git_repo" and exercise.grading_path is not None and submission.content is not None:
         base_path = exercise.grading_path
         if submission.submission_group_no is not None:
@@ -276,19 +281,35 @@ def do_checkout(exercise: Exercise, submission: Submission):
 
         console.print(f":file_folder: Working Directory (i.e. local storage) for this submission is: '{submission_path.resolve()}'")
         if submission_path.exists():
-            console.print("""Warning: The aforementioned directory exists already!
-            Please backup the contents of the folder and delete it so that we can proceed afresh.""")
+            console.print(""":construction: Warning: The aforementioned directory exists already!
+:arrow_right:  Please backup the contents of the folder (if needed) and delete it so that we can proceed afresh.""")
         else:
-            console.print(f":arrow_down: Cloning <{submission.content}> into the above directory")
+            console.print(f":arrow_down:  Cloning <{submission.content}> into the above directory")
+            assert submission.submitted_at is not None
             try:
-                git.Repo.clone_from(submission.content, submission_path)
+                repo = git.Repo.clone_from(submission.content, submission_path)
+
+                # logic to check out the lates commit within the submission period
+                hexsha = None
+                flag = False
+                for commit in repo.iter_commits():
+                    commit_dt = datetime.fromtimestamp(commit.authored_date).replace(tzinfo=LOCAL_TZ)
+                    if commit_dt > submission.submitted_at and not flag:
+                        console.print(f":see_no_evil: There are commits after solution was submitted on {submission.submitted_at.isoformat()} -> going to ignore those!")
+                        flag = True
+                    if commit_dt <= submission.submitted_at:
+                        hexsha = commit.hexsha
+                        break
+                if hexsha and flag:
+                    repo.git.checkout(hexsha)
+                    console.print(f":link: Checked out latest commit before submission: {hexsha}")
+
                 submission.state = SubmissionState.CHECKED_OUT
                 storage.upsert_submissions(exercise.id, [submission])
                 console.print(":wrench: You may now wish to inspect the repository content and make sure that all dependencies are resolved before running tests.")
-                console.print(":arrow_forward: You continue the evaluation of the submission by calling 'eval' with same parameters and providing the \"--continue\" option.")
+                console.print(f":play_or_pause_button:  When you are ready for the next step, please call: [green italic] fastoblig submissions eval {exercise.course} {exercise.id} {submission.id} --proceed")
             except git.GitCommandError as e:
                 console.print(e, style="red")
-            # TODO: copy the logic from sorting towards the relevant commit
 
     else:
         console.print(f"Exercise is of type: '{exercise.description_type}'! This type of exercise is currently not supported in FastOblig!")
@@ -333,7 +354,11 @@ def do_reset(exercise: Exercise, submission: Submission):
     console.print(f"Submission {submission.id} is back in state: SUBMITTED")
 
 
-def do_next_step(exercise: Exercise, submission: Submission):
+def do_next_step(
+    exercise: Exercise,
+    submission: Submission,
+    lang: Literal["EN", "NO", "DE"] = "NO"
+    ):
     """
     This method, depending on the current state of the submission in the evaluation procedure, for 
     a submission that already has been downloaded.
@@ -349,6 +374,8 @@ def do_next_step(exercise: Exercise, submission: Submission):
         submission_path = base_path / str(submission.id)
 
     if submission.state == SubmissionState.CHECKED_OUT:
+        console.rule(f"Current State: {submission.state.name} | Next Phase: TESTING")
+        # TODO: different options for testing backends
         console.print(":microscope: Running tests with backend: pytest:", end=" ")
         return_code, result = run_pytest(str((submission_path).resolve()))
         result_regex = re.compile(r"=* (.+) =*")
@@ -366,95 +393,121 @@ def do_next_step(exercise: Exercise, submission: Submission):
         submission.state = SubmissionState.TESTED
         submission.testresult = str(output_file.resolve())
         storage.upsert_submissions(submission.exercise, [submission], force=True)
-        console.print(":arrow_forward: You may now wish to inspect the test results before proceeding by sending it to GPT.")
+        console.print(":play_or_pause_button:  You may now wish to inspect the test results now. Proceed by calling" +
+                      f"[green italic] fastoblig submissions eval {exercise.course} {exercise.id} {submission.id} --proceed")
 
-    if submission.state == SubmissionState.TESTED:
+    elif submission.state == SubmissionState.TESTED:
+        console.rule(f"Current State: {submission.state.name} | Next Phase: EVALUATION")
         course = storage.get_course(exercise.course)
         assert course is not None
+        address = AddressSettings(language=lang, is_multiple=len(submission.members) > 1)
         system_prompt = create_system_prompt(exercise.grading_path / "exercise",
                                              "README.md", 
                                              course.description,
                                              exercise.name,
-                                             "Norwegian")
+                                             address)
         user_prompt = collect_submission_files(submission_path, 
                                                submission.submission_group_no if submission.submission_group_no else submission.id, 
                                                submission.testresult, 
                                                submission.comment)
         access_token = storage.get_token(OPENAI_TOKEN)
         if access_token is None:
-            console.print("Sorry! Cannot contact GPT because the OpenAI API token was not set! Use `fastoblig config`!")
+            console.print(":locked_with_key: [red]Sorry! Cannot contact GPT because the OpenAI API token was not set![/red] Use " +
+                "`fastoblig config --set-openai-token` to configure it!")
             return
 
-        console.print("Asking GPT for a feedback on the submission")
+        console.print(":rocket: Submission content sent to GPT for external assessment.")
+        spinner = console.status(":zzz: waiting for response...")
+        spinner.__enter__()
         response = contact_openai(access_token, user_prompt, system_prompt) 
-        console.print("Feedback received:")
+        spinner.__exit__(None, None, None)
+        console.print(":robot: Feedback received:")
 
         # fixing the sometimes weird formatting coming from GPT
         if response.startswith("```xml"):
             response = response[7:-3]
         response_lines = [l.strip() for l in response.splitlines()]
         response = "\n".join(response_lines)
+        if response.startswith("<review>"):
+            # FIXME: need some heuristic to address sometimes indeterministic XML responses 
+            response = "<response>\n" + response + "\n</response>"
             
         feedback_file = submission_path / "_fastoblig" / "feedback.xml"
         with open(feedback_file, mode="wt") as f:
             f.write(response)
 
-        feedback, score = read_feedback_xml(str(feedback_file.resolve()))
-
         submission.feedback = str(feedback_file.resolve())
         submission.state = SubmissionState.FEEDBACK_GENERATED
         storage.upsert_submissions(submission.exercise, [submission])
 
+        feedback, score = read_feedback_xml(str(feedback_file.resolve()))
+
+
         if feedback is not None:
             console.print(Panel(Markdown(feedback)))
-        console.print(f"First initial assesment: {score} ")
-        console.print(f"You may now want to inspect the feedback at '{feedback_file.resolve()}' and modify it before sending it" + 
-                      "back to the students in the next step")
-        return
+        console.print(f":robot: First initial assesment: [bold magenta] {score}")
+        console.print(f":face_with_monocle: You may now want to inspect and modify the current feedback " + 
+                      f"at '{feedback_file.resolve()}' before publishing it!" + 
+                      f"`fastoblig eval {exercise.course} {exercise.id} {submission.id} --proceed`")
+        console.print(":play_or_pause_button: Call [green italic]fastoblig submissions eval" +
+            f"{exercise.course} {exercise.id} {submission.id} --proceed[/green italic] when you are ready!")
 
 
-    if submission.state == SubmissionState.FEEDBACK_GENERATED:
-        console.print(f"current state is {submission.state}")
+    elif submission.state == SubmissionState.FEEDBACK_GENERATED:
+        console.rule(f"Current State: {submission.state.name} | Next Phase: FEEDBACK PUBLISHING")
         assert submission.feedback is not None
         feedback, _ = read_feedback_xml(submission.feedback)
         if feedback is not None:
-            console.print("Current feedback is:")
+            console.print(":speech_balloon: Current feedback is:")
             console.print(Panel(Markdown(feedback)))
             assert submission.content is not None
             posted_feedback = False
             if submission.content.startswith("https://github.com"):
                 is_confirmed = confirm(f"Do you want to upload this feedback to {submission.content}?")
+                address = AddressSettings(language=lang, is_multiple=len(submission.members) > 1)
                 if is_confirmed:
-                    issue_url = upload_issue(storage.get_token(GITHUB_TOKEN),
-                                             submission.content, 
+                    github_access_token = storage.get_token(GITHUB_TOKEN)
+                    if github_access_token is None:
+                        console.print(":locked_with_key: [red]Error! The `github access token` is not set![/red] "+ 
+                            "Please use `fastoblig config --set-github-token` to configure it!")
+                        return
+                    issue_url = upload_issue(github_access_token,
+                                             submission.content , 
                                              f"Feedback: {exercise.name}",
-                                             feedback)
+                                             feedback+ "\n\n" + address.github_comment_addendum())
                     posted_feedback = True
-                    console.print(f"Feedback posted at: {issue_url}")
+                    console.print(f":open_mailbox_with_raised_flag: Feedback posted at: <{issue_url}>")
                     is_confirmed = confirm(f"Do you want to link to this issue on the LMS submission page?", default=True)
-                    if is_confirmed:
+                    if is_confirmed and issue_url is not None:
                         client = CanvasClient(storage)
-                        client.update_submission(exercise.course, exercise.id, submission.members[0], 
-                                                 comment=f"Se more details at: {issue_url}")
+                        client.update_submission(exercise.course, exercise.id,
+                                                 submission.members[0], 
+                                                 is_group=submission.submission_group_id is not None,
+                                                 comment=address.see_also(issue_url))
             else:
                 is_confirmed = confirm("Do you want to upload this feedback to the LMS submission page?")
                 if is_confirmed:
                     client = CanvasClient(storage)
                     client.update_submission(exercise.course, exercise.id, submission.members[0], 
+                                             is_group=submission.submission_group_id is not None,
                                              comment=feedback)
                     posted_feedback = True
 
             if not posted_feedback:
-                is_confirmed = confirm("You did not post the feedback somewhere? Do you want to conclude this step anyways and proceed to the final grading?")
+                is_confirmed = confirm(":exclamation: You did not post the feedback somewhere!" +
+                    " Do you want to conclude this step anyways and proceed to the final grading :question_mark: ")
             if posted_feedback or is_confirmed:
                 submission.state = SubmissionState.FEEDBACK_PUBLISHED
                 storage.upsert_submissions(exercise.id, [submission])
+                console.print(f":play_or_pause_button: Feedback is published now! Use [green italic]" + 
+                              f"fastoblig eval {exercise.course} {exercise.id} {submission.id} --proceed" + 
+                              "[/green italic] to proceed to the final assessment stage!")
         else:
             console.print(f"Weird... The Feedback content is empty! Please check '{submission.feedback}'")
         return
 
-    if submission.state == SubmissionState.FEEDBACK_PUBLISHED:
-        console.print("Entering final stage: ASSESMENT")
+    elif submission.state == SubmissionState.FEEDBACK_PUBLISHED:
+        console.rule(f"Current State: {submission.state.name} | Next Phase: FINAL ASSESSMENT")
         if submission.testresult is not None:
             with open(submission.testresult, mode="rt") as f:
                 lines = f.readlines()
@@ -462,16 +515,17 @@ def do_next_step(exercise: Exercise, submission: Submission):
                     result_regex = re.compile(r"=* (.+) =*")
                     match = result_regex.match(lines[-1])
                     if match:
-                        console.print(f"Testresult was: {match.group(1)}")
+                        console.print(f":test_tube: Testresult was: [italic] {match.group(1)}")
         if submission.feedback is not None:
             _, score = read_feedback_xml(submission.feedback)
             if score:
-                console.print(f"GPT suggested character grade: {score}")
+                console.print(f":robot: GPT suggested character grade was: [bold magenta] {score}")
         client = CanvasClient(storage)
         if exercise.grading == "pass_fail":
-            score_input = prompt("Enter grade (pass/complete/fail/incomplete)")
+            score_input = prompt("Pleas enter grade (pass/complete/fail/incomplete)")
             comment_input = prompt("Comment (optional)", default="")
             client.update_submission(exercise.course, exercise.id, submission.members[0],
+                                     is_group=submission.submission_group_id is not None,
                                      comment=comment_input if len(comment_input) > 0 else None,
                                      grading=score_input)
             if score_input in {'complete', 'pass'}:
@@ -482,6 +536,7 @@ def do_next_step(exercise: Exercise, submission: Submission):
             score_input = prompt("Enter point score (e.g. 42.0)")
             comment_input = prompt("Comment (optional)", default="")
             client.update_submission(exercise.course, exercise.id, submission.members[0],
+                                     is_group=submission.submission_group_id is not None,
                                      comment=comment_input if len(comment_input) > 0 else None,
                                      grading=score_input)
             if float(score_input) > 0:
@@ -501,7 +556,6 @@ def grade_submission(
         submission: int,
         reset: bool = False,
         proceed: bool = False):
-    # TODO: add option for test-backend, option for adding a potential comment
     """
     Starts or continues the evaluation of the given SUBMISSION for the given EXERCISE.
     The evaluation has several phases, which are encoded in a state machine:
@@ -521,13 +575,15 @@ def grade_submission(
         if reset and sub.state != SubmissionState.UNSUBMITTED:
             do_reset(exercs, sub)
 
-        console.print(f"Starting Evalution of submission {submission} for group {sub.submission_group_no}...")
-        console.print("Group members:", end="\n\n")
+        if sub.submission_group_no:
+            student_grou_md = f"Group: **{sub.submission_group_no}**, Members:\n\n"
+        else:
+            student_grou_md = f"Individual Submission: student_id={sub.members[0]}\n\n"
         for stud_id in sub.members:
             student = storage.get_student(stud_id)
             if student:
-                console.print(f"  - {student.id}: {student.firstname} {student.lastname} ({student.email})")
-        console.print()
+                student_grou_md += f" - {student.id}: {student.firstname} {student.lastname} <mailto:{student.email}>\n"
+        console.print(Panel(Markdown(student_grou_md), title=f"Submission: {submission}", expand=False))
 
         if sub.state == SubmissionState.UNSUBMITTED:
             console.print(":thumbsdown: Sorry! But the submision is not submitted and can therefore not be assessed!")
@@ -539,7 +595,7 @@ def grade_submission(
                     timeliness = "[green]on time[/green]"
                 else:
                     timeliness = f"[red]late[/red] submitted: '{sub.submitted_at.isoformat()}', due: '{sub.extended_to.isoformat()}'"
-                console.print(f":hourglass: Submission was {timeliness}!")
+                console.print(f":nine_o’clock: Submission was {timeliness}!")
 
             do_checkout(exercs, sub)
 
@@ -548,7 +604,7 @@ def grade_submission(
         else:
             console.print(f"Submission is currently in state {sub.state}. Did you maybe forget to provide the '--proceed' option?")
     else:
-        console.print(f"Submission with id={submission} is not found for exercise={exercise}!")
+        console.print(f":boom: Submission with id={submission} is not found for exercise={exercise}!")
 
 
 

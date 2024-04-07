@@ -2,9 +2,67 @@ from datetime import datetime
 from pathlib import Path
 import subprocess
 from git import GitCommandError
-import re
-from openai import OpenAI
+from openai import OpenAI 
+from typing import Literal
+from pydantic import BaseModel
 # client = OpenAI()
+
+# TODO: make class for LLMs
+
+class AddressSettings(BaseModel):
+    language: Literal["NO"] | Literal["EN"] | Literal["DE"]
+    is_multiple: bool = False
+
+    def mk_prompt_part(self):
+        result = ""
+        if self.language == "NO":
+            result += "Write your feedback in Norwegian!"
+        elif self.language == "EN":
+            result += "Write your feedback in English."
+        elif self.language == "DE":
+            result += "Write you feedback in German."
+        result += "\n"
+        if self.is_multiple:
+            result += "Address the students in plural."
+        return result
+
+    def pronoun(self) -> str:
+        if self.language == "EN":
+            return "You"
+        elif self.language == "NO":
+            if self.is_multiple:
+                return "Dere"
+            else:
+                return "Du"
+        elif self.language == "DE":
+            if self.is_multiple:
+                return "Ihr"
+            else:
+                return "Du"
+        else:
+            return ""
+
+    def see_also(self, details: str):
+        if self.language == "NO":
+            return "Se flere detaljer her: " + details
+        elif self.language == "EN":
+            return "See more details at: " + details
+        elif self.language == "DE":
+            return "Mehr information hier: " + details
+
+    def github_comment_addendum(self) -> str:
+        if self.language == "NO":
+            return self.pronoun() + " kan bare _lukke_ dette \"issue\" som _løst_ når " + self.pronoun().lower() + " har lest gjenomm den :wink:"
+        elif self.language == "EN":
+            return "You can just _close_ this \"issue\" as _completed_ when you have read through the comments :wink:"
+        elif self.language == "DE":
+            if self.is_multiple:
+                return self.pronoun() + " könnt diesen \"issue\" als _fertig_ abschliessen wenn " + self.pronoun().lower() + " die Kommentare durchgelesen habt :wink:"
+            else:
+                return self.pronoun() + " kannst diesen \"issue\": als _fertig_ abschliessen wenn " + self.pronoun().lower() + " die Kommentare duchgelesen hast :wink:"
+        else:
+            return ""
+
 
 
 IGNORE_LIST = [
@@ -68,7 +126,7 @@ def create_system_prompt(
         exercise_file: str,
         course_desc: str, 
         exercise_name: str,
-        language: str = "English"
+        address_settings : AddressSettings
     ) -> str:
     description_file = exercise_folder / exercise_file
     exercise_description = open(description_file, mode="rt").read(-1)
@@ -110,14 +168,15 @@ Your response should formatted as a XML document, which comprises two sub-elemen
 The "review"-element contains your comprehensive commentary on the student submission.
 Focus mainly only the program logic and the student's reasoning, less on syntax and code aesthetics.
 Best practices concerning aspects such as commenting are secondary here.
-This should be a markdown-formatted text that 
+It should be a markdown-formatted text that 
   1. first, highlights things that the students did well, 
   2. secondly, pointing out potential errors, 
   3. thirdly, providing some tips on where to improve upon in the future or topics that the student may look into again.
-The text shall be written in such a way that it addresses the student directly. 
-Write in a positive and motivating tone but remain moderate in you temper (e.g. avoid expressions such "I am applauding you").
-The response to the student must be written in {language}.
-The "assessment"-elments contains a general overall assesment of the submission on the A-F scale, where "A" means "exceeding expecations",
+The text shall be written in such a way that it addresses the student(s) directly. 
+Write in a positive and motivating tone but remain moderate in you temper (i.e. avoid exaggerated expressions such 
+"I am applauding you" but write in a more modest tone like "good work").
+{address_settings.mk_prompt_part()}
+The "assessment"-elment contains a general overall assesment of the submission on the A-F scale, where "A" means "exceeding expecations",
 "B" means "very good = meeting all expectations" and so on.
 """
     return task

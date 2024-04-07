@@ -8,6 +8,10 @@ def upload_issue(access_token: str, repo_url: str, title: str, body: str) -> str
         "Authorization": f"Bearer {access_token}",
         "X-GitHub-Api-Version": "2022-11-28"
     }
+    if repo_url.endswith(".git"):
+        repo_url = repo_url[:-4]
+    if repo_url.endswith("/"):
+        repo_url = repo_url[:-1]
     url = f"{repo_url.replace('github.com', 'api.github.com/repos')}/issues"
     data = {
         "title": title, 
@@ -19,4 +23,5 @@ def upload_issue(access_token: str, repo_url: str, title: str, body: str) -> str
         return response.json()['html_url']
     else:
         logging.error(response.content)
+        return None
 

@@ -319,10 +319,17 @@ class CanvasClient:
         return result
 
 
-    def update_submission(self, course_id: int, assignment_id: int, student_id: int,
-                          comment: str | None = None, grading: str | None = None):
+    def update_submission(self,
+                          course_id: int,
+                          assignment_id: int,
+                          student_id: int,
+                          is_group: bool = True,
+                          comment: str | None = None,
+                          grading: str | None = None):
         url = f"{self.base_url}/courses/{course_id}/assignments/{assignment_id}/submissions/{student_id}"
         data = {}
+        if is_group:
+            data['comment[group_comment]'] = "true"
         if comment:
             data['comment[text_comment]'] = comment
         if grading:
