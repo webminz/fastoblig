@@ -24,6 +24,10 @@ from fastoblig.github import upload_issue
 APP_NAME = "fastoblig"
 console = Console()
 
+# FEATURE: statistic functions
+# FEATURE: add submission manually
+# TODO: different testing backends
+
 def startup():
     if "FASTOBLIG_HOME" in os.environ:
         app_dir = Path(os.environ['FASTOBLIG_HOME'])
@@ -429,7 +433,6 @@ def do_next_step(
         response_lines = [l.strip() for l in response.splitlines()]
         response = "\n".join(response_lines)
         if response.startswith("<review>"):
-            # FIXME: need some heuristic to address sometimes indeterministic XML responses 
             response = "<response>\n" + response + "\n</response>"
             
         feedback_file = submission_path / "_fastoblig" / "feedback.xml"
