@@ -402,6 +402,8 @@ feedback_file FROM submissions WHERE exercise = ?\
         stored submissions with state "unsubmitted" if those were associated with that member.
         It returns a dictionary that shows which submissions were added, modified, or deleted.
         """
+        def is_resubmit(old_s: Submission, new_s: Submission) -> bool:
+            return old_s.state in {SubmissionState.FAILED, SubmissionState.FAILED_IMPORTED} and new_s.state == SubmissionState.SUBMITTED
         result  = {}
         old = self.get_submissions(exercise_id)
         old_indexed = { s.id: s for s in old }
@@ -413,12 +415,9 @@ feedback_file FROM submissions WHERE exercise = ?\
                 old_submission = old_indexed[new.id]
                 if new.model_dump() == old_submission.model_dump():
                     result[new.id] = UpdateResult.UNCHANGED
+                elif not force and new.state.value < old_submission.state.value and not is_resubmit(old_submission, new):
+                    result[new.id] = UpdateResult.REJECTED
                 else:
-
-                    # do not let the GET request overwrite the database if it is more recent
-                    if not force and new.state not in {SubmissionState.PASSED, SubmissionState.FAILED} and new.state.value < old_submission.state.value:
-                        result[new.id] = UpdateResult.REJECTED
-                        continue
 
                     cursor.execute("""\
 UPDATE submissions SET

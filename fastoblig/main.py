@@ -3,7 +3,9 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+from sys import stdout
 from typing import Literal, Optional
+import subprocess
 import xml.etree.ElementTree as ET
 
 import pygit2
@@ -13,12 +15,13 @@ from rich.console import Console
 from rich.table import Table
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich import box
 
 from fastoblig.canvas import CanvasClient, LOCAL_TZ
 from fastoblig.domain import Exercise, Submission, SubmissionState
 from fastoblig.storage import GITHUB_TOKEN, Storage, CANVAS_TOKEN, OPENAI_TOKEN, UpdateResult
-from fastoblig.utils import GitProgressbar, run_pytest
-from fastoblig.feedback import AddressSettings, create_system_prompt, collect_submission_files, contact_openai
+from fastoblig.utils import GitProgressbar, run_pytest, run_test_deamon, run_test_bash
+from fastoblig.feedback import AddressSettings, create_system_prompt, collect_submission_files, contact_openai, determine_submission_file_state
 from fastoblig.github import upload_issue
 
 APP_NAME = "fastoblig"
@@ -288,6 +291,17 @@ def do_checkout(exercise: Exercise, submission: Submission):
             console.print(""":construction: Warning: The aforementioned directory exists already!
 :arrow_right:  Please backup the contents of the folder (if needed) and delete it so that we can proceed afresh.""")
         else:
+
+            # do some url sanitization
+            download_url = submission.content
+            
+
+            if download_url.endswith("/tree/main"):
+                cut_index = download_url.index("/tree/main")
+                download_url = download_url[:cut_index]
+
+            submission.content = download_url
+
             console.print(f":arrow_down:  Cloning <{submission.content}> into the above directory")
             assert submission.submitted_at is not None
             try:
@@ -333,35 +347,76 @@ def read_feedback_xml(file_path: str) -> tuple[str | None, str | None]:
     return (text, assesment)
 
 
-def do_reset(exercise: Exercise, submission: Submission):
+def do_reset(exercise: Exercise, submission: Submission, target_state: str):
     """
     This method resets a submission to the "SUBMITTED"-state.
     It also includes to remove the potentially checked out repository from disk.
     """
-    console.print("[orange] --reset was chosen: thus resetting the state of this submission[/orange]")
-    if exercise.grading_path:
-        base_path = exercise.grading_path
-        if submission.submission_group_no is not None:
-            submission_path = base_path / f"group_{submission.submission_group_no}"
-        else:
-            submission_path = base_path / str(submission.id)
-        if submission_path.exists():
-            shutil.rmtree(submission_path)
-            console.print(f"Removed directory: '{submission_path.resolve()}")
-    submission.state = SubmissionState.SUBMITTED
-    submission.graded_at = None 
-    submission.grade = None 
-    submission.testresult = None 
-    submission.comment = None
-    submission.feedback = None
+    # TODO: implement the new reset logic
+    try:
+        reset_to = SubmissionState[target_state]
+    except KeyError:
+        console.print(f":boom: [red] Given target reset stat \"{target_state}\" is unknown!")
+        return
+
+    if submission.state.value > reset_to.value and submission.state.value >= SubmissionState.FAILED.value:
+        console.print(f":black_left__pointing_double_triangle_with_vertical_bar: Resetting submission state: {submission.state.name}")
+        # apparently cnavas does not support changing the submission evaulation back
+        submission.graded_at = None 
+        submission.grade = None
+        submission.state = SubmissionState.FEEDBACK_PUBLISHED
+        
+    if submission.state.value > reset_to.value and submission.state.value >= SubmissionState.FEEDBACK_PUBLISHED.value:
+        console.print(f":black_left__pointing_double_triangle_with_vertical_bar: Resetting submission state: {SubmissionState.FEEDBACK_PUBLISHED.name}")
+        submission.state = SubmissionState.FEEDBACK_GENERATED
+        # later: have a look if one might delete the issue id -> probably requires saving it into the database also
+
+    if submission.state.value > reset_to.value and submission.state.value >= SubmissionState.FEEDBACK_GENERATED.value:
+        console.print(f":black_left__pointing_double_triangle_with_vertical_bar: Resetting submission state: {SubmissionState.FEEDBACK_GENERATED.name}")
+        submission.state = SubmissionState.TESTED
+        if submission.feedback:
+            console.print(f"Deleting: {submission.feedback}")
+            os.remove(submission.feedback)
+            submission.feedback = None
+
+    if submission.state.value > reset_to.value and submission.state.value >= SubmissionState.TESTED.value:
+        console.print(f":black_left__pointing_double_triangle_with_vertical_bar: Resetting submission state: {SubmissionState.TESTED.name}")
+        submission.state = SubmissionState.CHECKED_OUT
+        if submission.testresult:
+            console.print(f"Deleting: {submission.testresult}")
+            os.remove(submission.testresult)
+            submission.testresult = None
+
+    if submission.state.value > reset_to.value and submission.state.value >= SubmissionState.CHECKED_OUT.value:
+        console.print(f":black_left__pointing_double_triangle_with_vertical_bar: Resetting submission state: {SubmissionState.CHECKED_OUT.name}")
+        submission.state = SubmissionState.SUBMITTED
+        if submission.comment:
+            os.remove(submission.comment)
+            submission.comment = None
+        if exercise.grading_path:
+            base_path = exercise.grading_path
+            if submission.submission_group_no is not None:
+                submission_path = base_path / f"group_{submission.submission_group_no}"
+            else:
+                submission_path = base_path / str(submission.id)
+            if submission_path.exists():
+                shutil.rmtree(submission_path)
+                console.print(f"Removing directory: '{submission_path.resolve()}")
+
     storage.upsert_submissions(exercise.id, [submission], force=True)
-    console.print(f"Submission {submission.id} is back in state: SUBMITTED")
+    console.print(f"Submission {submission.id} is reset to state: {reset_to}")
 
 
 def do_next_step(
     exercise: Exercise,
     submission: Submission,
-    lang: Literal["EN", "NO", "DE"] = "NO"
+    comment: str | None = None,
+    lang: Literal["EN", "NO", "DE"] = "NO",
+    test_pytest: Optional[str] = None,
+    test_shell: Optional[str] = None, 
+    test_deamon: Optional[str] = None,
+    ignore_file_pattern: Optional[str] = None,
+    baseline_ts: Optional[datetime] = None
     ):
     """
     This method, depending on the current state of the submission in the evaluation procedure, for 
@@ -376,28 +431,76 @@ def do_next_step(
         submission_path = base_path / f"group_{submission.submission_group_no}"
     else:
         submission_path = base_path / str(submission.id)
+    output_file_dir = submission_path / "_fastoblig" 
+    output_file_dir.mkdir(parents=True, exist_ok=True)
+
+    if comment:
+        if submission.comment is None:
+            submission.comment = str((output_file_dir / "comments.txt" ).resolve())
+        with open(submission.comment, "a") as f:
+            f.write(comment)
+            f.write("\n")
 
     if submission.state == SubmissionState.CHECKED_OUT:
         console.rule(f"Current State: {submission.state.name} | Next Phase: TESTING")
-        # TODO: different options for testing backends
-        console.print(":microscope: Running tests with backend: pytest:", end=" ")
-        return_code, result = run_pytest(str((submission_path).resolve()))
-        result_regex = re.compile(r"=* (.+) =*")
-        match = result_regex.match(result.splitlines()[-1])
-        if match: 
-            console.print(match.group(1))
-        else:
-            console.print(f"Return code: {return_code}")
-        output_file_dir = submission_path / "_fastoblig" 
-        output_file_dir.mkdir(parents=True, exist_ok=True)
+
+        # prepare files
         output_file = output_file_dir / "testrestult.txt"
-        with open(output_file, mode="wt") as f:
-            f.write(result)
-        console.print(f":floppy_disk: Testresult written to '{output_file}'.")
+
+        deamon = None
+        if test_deamon:
+            console.print(f":japanese_ogre: Started a deamon process for testing: [dark_orange3]{test_deamon}")
+            deamon = run_test_deamon(test_deamon, submission_path)
+
+
+        if test_pytest:
+            console.print(":microscope: Running tests with backend: pytest:", end=" ")
+            return_code, result = run_pytest(str((submission_path).resolve()), test_pytest)
+            result_regex = re.compile(r"=* (.+) =*")
+            match = result_regex.match(result.splitlines()[-1])
+            if match: 
+                console.print(match.group(1))
+            else:
+                console.print(f"Return code: {return_code}")
+            with open(output_file, mode="wt") as f:
+                f.write(result)
+
+            console.print(f":floppy_disk: Testresult written to '{output_file}'.")
+            submission.testresult = str(output_file.resolve())
+        elif test_shell:
+            console.print(":mircoscope: Running tests with backend \\[shell]")
+            console.print(f":television: Running Shell command [cyan]{test_shell}[/cyan]")
+            return_code, testresult, stderr = run_test_bash(test_shell, submission_path)
+            console.print(f":checkered_flag: Test Command finished with return code {return_code}:")
+            if len(testresult) > 0:
+                console.print(Panel(testresult, box=box.DOUBLE, title="STDOUT"))
+                with open(output_file, mode="wt") as f:
+                    f.write(testresult)
+            else: 
+                console.print(Panel(stderr, box=box.ASCII, border_style="red", title="STDERR"))
+                with open(output_file, mode="wt") as f:
+                    f.write(stderr)
+
+            console.print(f":floppy_disk: Testresult written to '{output_file}'.")
+            submission.testresult = str(output_file.resolve())
+        else:
+            if deamon is not None:
+                deamon.terminate()
+            confirm("You did not specify any test backend?! Do you want to proceed to the next stage anyways?", abort=True)
+
+        if test_deamon and deamon:
+            deamon.terminate()
+            stdout, stderr = deamon.communicate()
+            if stdout:
+                with open(output_file_dir / "test_deamon_stdout.txt", mode="wb") as f:
+                    f.write(stdout)
+            if stderr:
+                with open(output_file_dir / "test_deamon_stderr.txt", mode="wb") as f:
+                    f.write(stderr)
+
         submission.state = SubmissionState.TESTED
-        submission.testresult = str(output_file.resolve())
         storage.upsert_submissions(submission.exercise, [submission], force=True)
-        console.print(":play_or_pause_button:  You may now wish to inspect the test results now. Proceed by calling" +
+        console.print(":play_or_pause_button:  You may now wish to inspect the test results now. Proceed by calling " +
                       f"[green italic] fastoblig submissions eval {exercise.course} {exercise.id} {submission.id} --proceed")
 
     elif submission.state == SubmissionState.TESTED:
@@ -410,10 +513,13 @@ def do_next_step(
                                              course.description,
                                              exercise.name,
                                              address)
-        user_prompt = collect_submission_files(submission_path, 
+        user_prompt = collect_submission_files(submission_path,
+                                               exercise.grading_path,
                                                submission.submission_group_no if submission.submission_group_no else submission.id, 
                                                submission.testresult, 
-                                               submission.comment)
+                                               submission.comment,
+                                               baseline_ts,
+                                               re.compile(ignore_file_pattern) if ignore_file_pattern else None)
         access_token = storage.get_token(OPENAI_TOKEN)
         if access_token is None:
             console.print(":locked_with_key: [red]Sorry! Cannot contact GPT because the OpenAI API token was not set![/red] Use " +
@@ -425,7 +531,7 @@ def do_next_step(
         spinner.__enter__()
         response = contact_openai(access_token, user_prompt, system_prompt) 
         spinner.__exit__(None, None, None)
-        console.print(":robot: Feedback received:")
+        console.print(":inbox_tray: Feedback received:")
 
         # fixing the sometimes weird formatting coming from GPT
         if response.startswith("```xml"):
@@ -450,10 +556,9 @@ def do_next_step(
             console.print(Panel(Markdown(feedback)))
         console.print(f":robot: First initial assesment: [bold magenta] {score}")
         console.print(f":face_with_monocle: You may now want to inspect and modify the current feedback " + 
-                      f"at '{feedback_file.resolve()}' before publishing it!" + 
-                      f"`fastoblig eval {exercise.course} {exercise.id} {submission.id} --proceed`")
+                      f"at '{feedback_file.resolve()}' before publishing it!")
         console.print(":play_or_pause_button: Call [green italic]fastoblig submissions eval" +
-            f"{exercise.course} {exercise.id} {submission.id} --proceed[/green italic] when you are ready!")
+            f"{exercise.course} {exercise.id} {submission.id} --proceed[/green italic] when you wanto to proceed!")
 
 
     elif submission.state == SubmissionState.FEEDBACK_GENERATED:
@@ -557,8 +662,16 @@ def grade_submission(
         course: int,
         exercise: int,
         submission: int,
-        reset: bool = False,
-        proceed: bool = False):
+        comment: Optional[str] = None,
+        reset: Optional[str] = None,
+        proceed: bool = False,
+        lang: str = "NO",
+        test_pytest: Optional[str] = None,
+        test_shell: Optional[str] = None,
+        test_deamon: Optional[str] = None,
+        baseline_ts: Optional[datetime] = None, 
+        ignore_file_pattern: Optional[str] = "tests/.*"
+    ):
     """
     Starts or continues the evaluation of the given SUBMISSION for the given EXERCISE.
     The evaluation has several phases, which are encoded in a state machine:
@@ -576,7 +689,8 @@ def grade_submission(
         sub = relevant_subs[0]
 
         if reset and sub.state != SubmissionState.UNSUBMITTED:
-            do_reset(exercs, sub)
+            do_reset(exercs, sub, reset)
+            return
 
         if sub.submission_group_no:
             student_grou_md = f"Group: **{sub.submission_group_no}**, Members:\n\n"
@@ -603,11 +717,42 @@ def grade_submission(
             do_checkout(exercs, sub)
 
         elif proceed and sub.state not in {SubmissionState.PASSED, SubmissionState.FAILED}:
-            do_next_step(exercs, sub)
+            lang_arg : Literal['EN', 'NO', 'DE'] = "NO"
+            if lang:
+                if lang == "NO":
+                    lang_arg = "NO"
+                elif lang == 'EN':
+                    lang_arg = "EN"
+                elif lang == "DE":
+                    lang_arg = "DE"
+                else:
+                    console.print(f"[red] Unknown/unsupported language: {lang}")
+                    return
+
+            do_next_step(
+                exercs,
+                sub,
+                lang=lang_arg,
+                test_pytest=test_pytest,
+                test_shell=test_shell,
+                test_deamon=test_deamon,
+                baseline_ts=baseline_ts,
+                ignore_file_pattern=ignore_file_pattern,
+                comment=comment
+            )
+
         else:
             console.print(f"Submission is currently in state {sub.state}. Did you maybe forget to provide the '--proceed' option?")
     else:
         console.print(f":boom: Submission with id={submission} is not found for exercise={exercise}!")
+
+
+@app.command("test")
+def run_external(ignore_file_pattern: str = "tests/.*", baseline_ts: Optional[datetime] = None):
+    console.print("Collecting")
+    work_dir = Path('/Users/past-madm/Projects/teaching/ing301/v24/grading_c/group_19')
+    relative_dir = Path('/Users/past-madm/Projects/teaching/ing301/v24/grading_c/exercise')
+    print(collect_submission_files(work_dir, relative_dir, 19, None, None, baseline_ts, re.compile(ignore_file_pattern)))
 
 
 

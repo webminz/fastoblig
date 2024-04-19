@@ -1,10 +1,13 @@
+from zoneinfo import ZoneInfo
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-import subprocess
-from git import GitCommandError
+from git import Repo
 from openai import OpenAI 
 from typing import Literal
 from pydantic import BaseModel
+import re
+import filecmp
 
 # TODO: make class for LLMs
 
@@ -65,10 +68,12 @@ class AddressSettings(BaseModel):
 
 
 IGNORE_LIST = [
-    'requirements.txt',
-    'readme.md',
-    'pyproject.toml',
-    'build.gradle',
+    re.compile('requirements.txt'),
+    re.compile('readme.md'),
+    re.compile('pyproject.toml'),
+    re.compile('build.gradle'),
+    re.compile(r'(.*/)?__.*'),
+    re.compile(r'(.*/)?\..*')
 ]
 INTERESTING_TYPES = [
     '.md',
@@ -125,7 +130,8 @@ def create_system_prompt(
         exercise_file: str,
         course_desc: str, 
         exercise_name: str,
-        address_settings : AddressSettings
+        address_settings : AddressSettings,
+        additional_instructions: str = ""
     ) -> str:
     description_file = exercise_folder / exercise_file
     exercise_description = open(description_file, mode="rt").read(-1)
@@ -156,44 +162,104 @@ The user will prompt you with individual student submissions and your task is to
 The student submssion will provided as an XML element containing 
 - an "id"-attribute identifying the submission, 
 - a list of "file"-elements showing the contents of the files that make up the student submission,
-- optionally, a "testresult"-element showing the standard output of running the unit tests on the submission,
-- optionally, a "comment"-element containing comments on the submission provided by the course teacher,
+- optionally, a "testresult"-element showing the output of the unit test tool,
+- optionally, "stdout" and "sterr" elements that capture the output of the application during unit test execution,
+- finally, an optional "comment"-element containing comments on the submission provided by the course teacher,
   which should be taken into account when asessing the submission.
+{additional_instructions}
 
 Your response should formatted as a XML document, which comprises two sub-elements:
 - review
 - assesment
 
 The "review"-element contains your comprehensive commentary on the student submission.
-Focus mainly only the program logic and the student's reasoning, less on syntax and code aesthetics.
-Best practices concerning aspects such as commenting are secondary here.
+Focus mainly on the program logic and the student's reasoning process, less on syntax errors and code aesthetics.
+Best practices concerning things such as commenting practice are secondary here.
 It should be a markdown-formatted text that 
-  1. first, highlights things that the students did well, 
-  2. secondly, pointing out potential errors, 
-  3. thirdly, providing some tips on where to improve upon in the future or topics that the student may look into again.
+  1. first, highlight things that the students did well, 
+  2. secondly, point out potential errors or limiations, 
+  3. thirdly, provide some tips on where to improve upon in the future or topics that the student may look into again.
 The text shall be written in such a way that it addresses the student(s) directly. 
-Write in a positive and motivating tone but remain moderate in you temper (i.e. avoid exaggerated expressions such 
-"I am applauding you" but write in a more modest tone like "good work").
+You shall write in a positive and motivating tone but remain modest in you temper (i.e. avoid exaggerated expressions such as  
+"I am applauding you" or "that was impressive" but write in a more down-to-earth tone like "keep up the solid work").
 {address_settings.mk_prompt_part()}
 The "assessment"-elment contains a general overall assesment of the submission on the A-F scale, where "A" means "exceeding expecations",
 "B" means "very good = meeting all expectations" and so on.
 """
     return task
 
+class SubmissionFileState(Enum):
+    UNCHANGED = 0 # wrt startcode 
+    NEW = 1 
+    CHANGED = 2
+    IGNORED = 3 # according to builtin ignore lists
+    OLD = 4 # wrt commit indices
+
+def determine_submission_file_state(
+        submission_folder: Path,
+        startcode_folder: Path,
+        baseline_ts: datetime | None = None,
+        additional_ignore : re.Pattern | None = None,
+        interesting_file_types: list[str] = INTERESTING_TYPES,
+        ignore_list: list[re.Pattern] = IGNORE_LIST
+    ) -> list[tuple[str, SubmissionFileState]]:
+
+    submission_repo = Repo(submission_folder)
+    tz = ZoneInfo("Europe/Oslo")
+    current = None
+    for c in submission_repo.iter_commits():
+        if baseline_ts and datetime.fromtimestamp(c.committed_date).replace(tzinfo=tz) > baseline_ts:
+            break
+        current = c.hexsha
+
+    if current:
+        baseline_commit = submission_repo.commit(current)
+        paths = [ (p.a_path, p.change_type) for p in baseline_commit.diff() ]
+    else:
+        paths = [ (str(f.relative_to(submission_folder)), "A") for f in submission_folder.rglob("[.!]*") if f.is_file()]
+
+    startcode_paths = [ str(f.relative_to(startcode_folder)) for f in startcode_folder.rglob("[!.]*") if f.is_file() ]
+
+    result = []
+    for p, m in paths:
+        if not any([p.endswith(x) for x in interesting_file_types]):
+            result.append((p, SubmissionFileState.IGNORED))
+            continue
+
+        if any([x.fullmatch(p.lower()) for x in ignore_list]):
+            result.append((p, SubmissionFileState.IGNORED))
+            continue
+
+        if additional_ignore and additional_ignore.fullmatch(p):
+            result.append((p, SubmissionFileState.IGNORED))
+            continue
+
+        if p in startcode_paths:
+            left = submission_folder / p 
+            right = startcode_folder / p
+            if filecmp.cmp(left, right):
+                result.append((p, SubmissionFileState.UNCHANGED))
+                continue
+
+        result.append((p, SubmissionFileState.CHANGED if m == "M" else SubmissionFileState.NEW))
+    return result
+
 
 def collect_submission_files(
-        folder: Path,
+        submission_folder: Path,
+        startcode_folder: Path,
         submission_id: int,
         testresult_file: str | None, 
-        comment_file: str | None
+        comment_file: str | None,
+        baseline_ts: datetime | None = None,
+        ignore_file_pattern: re.Pattern | None = None
     ) -> str:
     files = []
-    for f in [x for x in folder.rglob("*") if not is_uninteresting(x, folder)]:
-        # TODO: make it proper by comparing the files for changes based on index
-        if not f.name.startswith("test_"):
-            c = open(f, mode="rt").read(-1)
+    for f, s in determine_submission_file_state(submission_folder, startcode_folder, baseline_ts, ignore_file_pattern):
+        if s in {SubmissionFileState.NEW, SubmissionFileState.CHANGED}:
+            c = open(submission_folder / f, mode="rt").read(-1)
             t = f"""\
-<file path="{f.relative_to(folder)}">
+<file path="{f}">
 {c}
 </file>\
 """
@@ -215,6 +281,7 @@ def collect_submission_files(
 {f.read(-1)}
 </comment>
             """
+
     result = f"""\
 <submission id={submission_id}>
 {files_text}

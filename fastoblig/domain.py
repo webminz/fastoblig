@@ -68,21 +68,23 @@ class Exercise(BaseModel):
 class SubmissionState(Enum):
     UNSUBMITTED = 0
     SUBMITTED = 1
-    FAILED = 2 
-    PASSED = 3 
+    FAILED_IMPORTED = 2 
+    PASSED_IMPORTED = 3 
     CHECKED_OUT = 4 
     TESTED = 5 
     FEEDBACK_GENERATED = 6 
     FEEDBACK_PUBLISHED = 7
+    FAILED = 8
+    PASSED = 9
 
     @staticmethod
     def from_workflow_state(state: str, grade: str | float | None):
         if state == "submitted":
             return SubmissionState.SUBMITTED
         elif state == "graded" and grade == "complete":
-            return SubmissionState.PASSED # externally graded
+            return SubmissionState.PASSED_IMPORTED # externally graded
         elif state == "graded":
-            return SubmissionState.FAILED
+            return SubmissionState.FAILED_IMPORTED
         else:
             return SubmissionState.UNSUBMITTED
 

@@ -134,8 +134,18 @@ _submission_group_regex = re.compile(r".*\s(\d+)")
 def parse_submission(exercise: int, json: dict[str, Any]):
     if "id" in json and "workflow_state" in json and "submission_type" in json:
         id = json["id"]
-        if json["submission_type"] == "online_url":
+        sub_type = json['submission_type']
+        if sub_type == "online_url":
             content = json["url"]
+        elif sub_type == "online_text_entry" and "href=" in json['body']:
+            # The following is very eager, it should probably only be triggered if submission type is online_url
+            html_extract_pattern = re.compile(r".*href=\"(.*)\".*")
+            match = html_extract_pattern.match(json['body'])
+            if match:
+                sub_type = "online_url"
+                content = match.group(1)
+            else:
+                content = json['body']
         else:
             content = json["body"]
 
@@ -180,7 +190,7 @@ def parse_submission(exercise: int, json: dict[str, Any]):
         return Submission(
             id=id,
             content=content,
-            submission_type=json['submission_type'],
+            submission_type=sub_type,
             exercise=exercise,
             submitted_at=submission_ts,
             extended_to=extended_to,
