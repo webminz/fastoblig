@@ -5,6 +5,11 @@ from pydantic import BaseModel
 from pathlib import Path
 
 class Student(BaseModel):
+    """
+    Students are uniquely identified by a numeric id, given by the LMS.
+    Also, the student email may be used as a secondary identifier as 
+    it generally contains some form of student id.
+    """
     id: int
     student_no: int | None
     firstname: str 
@@ -12,10 +17,16 @@ class Student(BaseModel):
     email: str
 
 class Course(BaseModel):
+    """
+    Represents a course _instance_!
+    Each course instance has a unique id.
+    Each course instance has course code.
+    The combination of couse code, year, and semester should be unique.
+    """
     id: int 
     code: str | None
     description: str 
-    semester : Literal["spring"] | Literal["fall"] | None
+    semester : Literal["spring", "fall"] | None
     year: int | None
 
     def __lt__(self, other: Any) -> bool:
@@ -31,19 +42,34 @@ class Course(BaseModel):
                 return False 
         return True
 
+ExerciseDescriptionType = Literal['git_repo', 'canvas_quiz', 'canvas_html', 'plaintext']
+
+GradingType = Literal['pass_fail', 'points']
+
+SubissionType = Literal['online_upload', 'online_text_entry', 'online_quiz', 'online_url']
+
 class Exercise(BaseModel):
-    id : int 
+    """
+    A course exercise that is graded, which comprises the following fields.
+
+    :id: int (numeric id of the exercise, is assigned by the LMS, global uniqueness is assumed)
+    :course: int (reference to the associated course)
+    :name: str (a short title of the exercise)
+    :content: str (detailed description of the exercise, internal structure depends on the type of exercise)
+    """
+    id : int  
     course: int
     name: str 
     content: str | None
-    grading : str | None 
+    grading_type : GradingType = "points" 
     max_points: float | None
-    description_type : str = "canvas"
+    description_type : ExerciseDescriptionType = "canvas_html"
     deadline: datetime | None 
     category: str | None 
     published: bool = True
     # gruppesett in Canvas
     submission_category_id: int | None 
+    # The location, where the grading data is stored on the local filesystem
     grading_path: Path | None = None
 
     def __lt__(self, other: Any):
@@ -81,28 +107,49 @@ class SubmissionState(Enum):
     def from_workflow_state(state: str, grade: str | float | None):
         if state == "submitted":
             return SubmissionState.SUBMITTED
-        elif state == "graded" and grade == "complete":
+        elif state == "graded" and (grade == "complete" or (isinstance(grade, float) and grade > 0.0)):
             return SubmissionState.PASSED_IMPORTED # externally graded
         elif state == "graded":
             return SubmissionState.FAILED_IMPORTED
         else:
             return SubmissionState.UNSUBMITTED
 
+    # TODO: succesor states and custom compare
+
+    def __lt__(self, other):
+        if isinstance(other, SubmissionState):
+            return self.value < other.value
+        else:
+            return False
+
+    
+    def __eq__(self, other):
+        if isinstance(other, SubmissionState):
+            return self.value == other.value
+        else:
+            return False
+
 
 class Submission(BaseModel):
+    """
+    Represent the submission for an exercise made by a group of students.
+    This group of students might as well consist of a single student.
+    """
+
+    # TODO: custom compare
+
     id: int 
     exercise: int 
     content: str | None
+    state : SubmissionState 
+    contributions: list[int]
     submission_type: str | None
     submission_group_id: int | None
     submission_group_name: str | None
-    submission_group_no: int | None 
-    members : list[int]
-    state : SubmissionState = SubmissionState.UNSUBMITTED
-    submitted_at: datetime | None  
-    graded_at: datetime | None  
+    submitted_at: datetime | None  = None
+    graded_at: datetime | None = None
     extended_to: datetime | None = None
     grade: float | None = None
-    testresult: str | None = None
-    comment: str | None = None
-    feedback: str | None = None
+    testresult_file: Path | None = None
+    comment_file: Path | None = None
+    feedback_file: Path | None = None

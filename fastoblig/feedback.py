@@ -12,31 +12,31 @@ import filecmp
 # TODO: make class for LLMs
 
 class AddressSettings(BaseModel):
-    language: Literal["NO"] | Literal["EN"] | Literal["DE"]
+    language: Literal["no"] | Literal["en"] | Literal["de"]
     is_multiple: bool = False
 
     def mk_prompt_part(self):
         result = ""
-        if self.language == "NO":
+        if self.language == "no":
             result += "Write your feedback in Norwegian!"
-        elif self.language == "EN":
+        elif self.language == "en":
             result += "Write your feedback in English."
-        elif self.language == "DE":
-            result += "Write you feedback in German."
+        elif self.language == "de":
+            result += "Write your feedback in German."
         result += "\n"
         if self.is_multiple:
             result += "Address the students in plural."
         return result
 
     def pronoun(self) -> str:
-        if self.language == "EN":
+        if self.language == "en":
             return "You"
-        elif self.language == "NO":
+        elif self.language == "no":
             if self.is_multiple:
                 return "Dere"
             else:
                 return "Du"
-        elif self.language == "DE":
+        elif self.language == "de":
             if self.is_multiple:
                 return "Ihr"
             else:
@@ -45,19 +45,19 @@ class AddressSettings(BaseModel):
             return ""
 
     def see_also(self, details: str):
-        if self.language == "NO":
+        if self.language == "no":
             return "Se flere detaljer her: " + details
-        elif self.language == "EN":
+        elif self.language == "en":
             return "See more details at: " + details
-        elif self.language == "DE":
+        elif self.language == "de":
             return "Mehr information hier: " + details
 
     def github_comment_addendum(self) -> str:
-        if self.language == "NO":
+        if self.language == "no":
             return self.pronoun() + " kan bare _lukke_ dette \"issue\" som _løst_ når " + self.pronoun().lower() + " har lest gjenomm den :wink:"
-        elif self.language == "EN":
+        elif self.language == "en":
             return "You can just _close_ this \"issue\" as _completed_ when you have read through the comments :wink:"
-        elif self.language == "DE":
+        elif self.language == "de":
             if self.is_multiple:
                 return self.pronoun() + " könnt diesen \"issue\" als _fertig_ abschliessen wenn " + self.pronoun().lower() + " die Kommentare durchgelesen habt :wink:"
             else:
@@ -128,7 +128,6 @@ def collect_startcode_files(folder: Path) -> str:
 def create_system_prompt(
         exercise_folder: Path,
         exercise_file: str,
-        course_desc: str, 
         exercise_name: str,
         address_settings : AddressSettings,
         additional_instructions: str = ""
@@ -140,8 +139,8 @@ def create_system_prompt(
     task = f"""\
 {PERSONA}
 
-Your task is to review students submissions to a mandatory programming exercise in the course: "{course_desc}".
-The exercise descriptions is given below as a XML-element:
+Your task is to review students submissions to a mandatory programming exercises.
+The exercise descriptions is given below as an XML-element:
 
 <exercise name=\"{exercise_name}\">
 {exercise_description}
@@ -151,12 +150,10 @@ The students are provided with "startcode" in a GitHub repository, that they wil
 The contents of this repository are given below in XML, where each "file"-element provides the relative "path" of the file inside the repository 
 as as the startcode-file contents:
 
-
 File contents (given as XML-elements):
 <startcode>
 {startcode_files}
 </startcode>
-
 
 The user will prompt you with individual student submissions and your task is to respond with a extensive code review of the student submission.
 The student submssion will provided as an XML element containing 
@@ -165,7 +162,7 @@ The student submssion will provided as an XML element containing
 - optionally, a "testresult"-element showing the output of the unit test tool,
 - optionally, "stdout" and "sterr" elements that capture the output of the application during unit test execution,
 - finally, an optional "comment"-element containing comments on the submission provided by the course teacher,
-  which should be taken into account when asessing the submission.
+  which should be taken into account when reviewing the submission and giving feedback.
 {additional_instructions}
 
 Your response should formatted as a XML document, which comprises two sub-elements:
@@ -237,6 +234,8 @@ def determine_submission_file_state(
         if p in startcode_paths:
             left = submission_folder / p 
             right = startcode_folder / p
+            if not left.exists():
+                continue
             if filecmp.cmp(left, right):
                 result.append((p, SubmissionFileState.UNCHANGED))
                 continue
@@ -249,14 +248,14 @@ def collect_submission_files(
         submission_folder: Path,
         startcode_folder: Path,
         submission_id: int,
-        testresult_file: str | None, 
-        comment_file: str | None,
+        testresult_file: Path | None, 
+        comment_file: Path | None,
         baseline_ts: datetime | None = None,
         ignore_file_pattern: re.Pattern | None = None
     ) -> str:
     files = []
     for f, s in determine_submission_file_state(submission_folder, startcode_folder, baseline_ts, ignore_file_pattern):
-        if s in {SubmissionFileState.NEW, SubmissionFileState.CHANGED}:
+        if s in {SubmissionFileState.NEW, SubmissionFileState.CHANGED} and (submission_folder / f).exists():
             c = open(submission_folder / f, mode="rt").read(-1)
             t = f"""\
 <file path="{f}">
@@ -292,15 +291,38 @@ def collect_submission_files(
     return result
 
 
+class ChatModel(BaseModel):
+    model_id: str 
+    provider: str
+    context_window: int
+    max_output_tokens: int
+    input_token_price: float 
+    output_token_price: float
+
+# see: https://platform.openai.com/docs/models
+
+GPT35_TURBO = ChatModel(model_id="gpt-3.5-turbo-0125", provider="openai", context_window=16385, max_output_tokens=4096, input_token_price=0.5, output_token_price=1.5)
+
+GPT4O_MINI = ChatModel(model_id="gpt-4o-mini-2024-07-18", provider="openai", context_window=128000, max_output_tokens=16384, input_token_price=0.15, output_token_price=0.6)
+
+GPT4O = ChatModel(model_id="gpt-4o-2024-11-20", provider="openai", context_window=128000, max_output_tokens=16384, input_token_price=2.5, output_token_price=10.0)
+
+GPTO3_MINI = ChatModel(model_id="o3-mini-2025-01-31", provider="openai", context_window=200000, max_output_tokens=100000, input_token_price=1.10, output_token_price=4.4)
+
+
+
+
+    
+
 def contact_openai(
     access_token: str, 
     user_prompt: str,
     system_prompt: str = "You are a helpful assistant",
-    use_model: str = "gpt-4-turbo-preview"
+    use_model: ChatModel = GPTO3_MINI
     ) -> str:
     client = OpenAI(api_key=access_token)
     completion = client.chat.completions.create(
-        model=use_model,
+        model=use_model.model_id,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
